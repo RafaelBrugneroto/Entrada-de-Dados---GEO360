@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import pandas as pd
 import re
+from geotechnical_tab import GeotechnicalDesignTab
 
 # Constante de tipos de solo, útil para a aba de Sondagens
 SOIL_TYPES = ["Argila", "Argila Arenosa", "Argila Siltosa", "Silte Argiloso", "Silte Arenoso", "Areia Siltosa", "Areia Argilosa", "Areia"]
@@ -39,6 +40,10 @@ class App(tk.Tk):
         self.sondagem_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.sondagem_frame, text="Sondagens")
         self.setup_sondagem_tab()
+
+        # Aba de Dimensionamento Geotecnico
+        self.geo_design_frame = GeotechnicalDesignTab(self.notebook, self)
+        self.notebook.add(self.geo_design_frame, text="Dimensionamento Geot\u00e9cnico")
 
     def setup_pilar_tab(self):
         """Configura a aba 'Pilares'."""
