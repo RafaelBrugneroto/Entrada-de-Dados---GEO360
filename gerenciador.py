@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import pandas as pd
 import re
+import json
 from geotechnical_tab import GeotechnicalDesignTab
 
 # Constante de tipos de solo, útil para a aba de Sondagens
@@ -22,9 +23,14 @@ class App(tk.Tk):
         self.dados_sondagens = {}
         self.current_sondagem_name = None # Rastreia a sondagem atualmente selecionada
         self.last_pilares_excel_path = None # Armazena o caminho do último Excel de pilares importado
+        self.sondagem_treeviews = {} # Dicionário para armazenar as Treeviews das sondagens
 
         # --- Interface do Usuário ---
         self.setup_ui()
+        self.load_sondagem_data() # Carrega os dados das sondagens ao iniciar
+
+        # --- Protocolo de Fechamento ---
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def setup_ui(self):
         """Configura a interface principal com abas."""
@@ -43,7 +49,7 @@ class App(tk.Tk):
 
         # Aba de Dimensionamento Geotecnico
         self.geo_design_frame = GeotechnicalDesignTab(self.notebook, self)
-        self.notebook.add(self.geo_design_frame, text="Dimensionamento Geot\u00e9cnico")
+        self.notebook.add(self.geo_design_frame, text="Dimensionamento Geotécnico")
 
     def setup_pilar_tab(self):
         """Configura a aba 'Pilares'."""
@@ -124,7 +130,7 @@ class App(tk.Tk):
                 messagebox.showwarning("Aviso", f"Sondagem '{nome}' já existe.")
                 return
             
-            self.dados_sondagens[nome] = {'NA': 0.0, 'Cota_Terreno': 0.0, 'Camadas': []}
+            self.dados_sondagens[nome] = {'NA': 0.0, 'Cota_Terreno': 0.0, 'camadas': []}
             self.update_sondagem_display()
             
             # Seleciona a nova aba criada
@@ -202,24 +208,22 @@ class App(tk.Tk):
         dialog.transient(self)
         dialog.grab_set()
 
-        cota_terreno_sondagem = self.dados_sondagens[sondagem_name].get('Cota_Terreno', 0.0)
+        # Obter a última profundidade final das camadas para preenchimento inicial
         last_prof_final = 0.0
-        if self.dados_sondagens[sondagem_name]['Camadas']:
-            last_prof_final = self.dados_sondagens[sondagem_name]['Camadas'][-1]['Prof_Final']
+        if self.dados_sondagens[sondagem_name]['camadas']:
+            last_prof_final = self.dados_sondagens[sondagem_name]['camadas'][-1]['prof_final_camada']
         
-        last_cota_final = cota_terreno_sondagem - last_prof_final
-
         row = 0
-        ttk.Label(dialog, text="Cota Inicial (m):").grid(row=row, column=0, padx=5, pady=2, sticky='w')
-        cota_inicial_entry = ttk.Entry(dialog)
-        cota_inicial_entry.grid(row=row, column=1, padx=5, pady=2, sticky='ew')
-        cota_inicial_entry.insert(0, f"{last_cota_final:.2f}")
+        ttk.Label(dialog, text="Prof. Inicial (m):").grid(row=row, column=0, padx=5, pady=2, sticky='w')
+        prof_inicial_entry = ttk.Entry(dialog)
+        prof_inicial_entry.grid(row=row, column=1, padx=5, pady=2, sticky='ew')
+        prof_inicial_entry.insert(0, f"{last_prof_final:.2f}")
         row += 1
 
-        ttk.Label(dialog, text="Cota Final da Camada (m):").grid(row=row, column=0, padx=5, pady=2, sticky='w')
-        cota_final_entry = ttk.Entry(dialog)
-        cota_final_entry.grid(row=row, column=1, padx=5, pady=2, sticky='ew')
-        cota_final_entry.insert(0, f"{last_cota_final - 1.0:.2f}")
+        ttk.Label(dialog, text="Prof. Final da Camada (m):").grid(row=row, column=0, padx=5, pady=2, sticky='w')
+        prof_final_entry = ttk.Entry(dialog)
+        prof_final_entry.grid(row=row, column=1, padx=5, pady=2, sticky='ew')
+        prof_final_entry.insert(0, f"{last_prof_final + 1.0:.2f}") # Sugere 1m a mais de profundidade
         row += 1
 
         ttk.Label(dialog, text="Intervalo (m):").grid(row=row, column=0, padx=5, pady=2, sticky='w')
@@ -237,49 +241,64 @@ class App(tk.Tk):
 
         def add_layer_action():
             try:
-                cota_inicial = float(cota_inicial_entry.get().replace(',', '.'))
-                cota_final = float(cota_final_entry.get().replace(',', '.'))
+                prof_inicial_input = float(prof_inicial_entry.get().replace(',', '.'))
+                prof_final_input = float(prof_final_entry.get().replace(',', '.'))
                 intervalo = float(interval_entry.get().replace(',', '.'))
                 tipo_solo = tipo_solo_combo.get()
 
-                if cota_final >= cota_inicial or intervalo <= 0:
-                    messagebox.showerror("Erro", "Cota Final deve ser menor que a Inicial e o Intervalo deve ser positivo.")
+                if prof_final_input <= prof_inicial_input or intervalo <= 0:
+                    messagebox.showerror("Erro", "Profundidade Final deve ser maior que a Inicial e o Intervalo deve ser positivo.")
                     return
 
-                camadas_atuais = self.dados_sondagens[sondagem_name]['Camadas']
-                cota_terreno = self.dados_sondagens[sondagem_name].get('Cota_Terreno', 0.0)
-
-                # Mantém camadas que não se sobrepõem ao novo intervalo
+                camadas_atuais = self.dados_sondagens[sondagem_name]['camadas']
+                
+                # Mantém camadas que NÃO se sobrepõem ao novo intervalo de PROFUNDIDADE
                 camadas_mantidas = []
                 for camada in camadas_atuais:
-                    cota_camada_inicial = cota_terreno - camada['Prof_Inicial']
-                    cota_camada_final = cota_terreno - camada['Prof_Final']
-                    if cota_camada_final >= cota_inicial or cota_camada_inicial <= cota_final:
+                    # Condição para NÃO sobreposição: a camada existente termina antes da nova começar OU começa depois da nova terminar
+                    if camada['prof_final_camada'] <= prof_inicial_input or camada['prof_inicial'] >= prof_final_input:
                         camadas_mantidas.append(camada)
                 
-                # Gera novas camadas
+                # Gera novas camadas no intervalo especificado
                 novas_camadas = []
-                cota_atual = cota_inicial
-                while cota_atual > cota_final:
-                    proxima_cota = max(cota_atual - intervalo, cota_final)
-                    prof_inicial_seg = round(cota_terreno - cota_atual, 2)
-                    prof_final_seg = round(cota_terreno - proxima_cota, 2)
+                prof_atual = prof_inicial_input
+                while prof_atual < prof_final_input:
+                    proxima_prof = min(prof_atual + intervalo, prof_final_input)
                     
                     novas_camadas.append({
-                        'Prof_Inicial': prof_inicial_seg, 'Prof_Final': prof_final_seg,
-                        'Tipo_Solo': tipo_solo, 'NSPT': 0
+                        'prof_inicial': round(prof_atual, 2),
+                        'prof_final_camada': round(proxima_prof, 2),
+                        'tipo_solo': tipo_solo,
+                        'n_spt': 0 # NSPT é preenchido manualmente após a adição
                     })
-                    cota_atual = proxima_cota
+                    prof_atual = proxima_prof
                 
-                todas_camadas = sorted(camadas_mantidas + novas_camadas, key=lambda x: x['Prof_Final'])
+                # Combina e reordena todas as camadas pela profundidade inicial (key=lambda x: x['prof_inicial'])
+                todas_camadas = sorted(camadas_mantidas + novas_camadas, key=lambda x: x['prof_inicial'])
                 
-                # Reajusta Prof_Inicial para garantir continuidade
+                # Reajusta Prof_Inicial para garantir continuidade (se a primeira camada começar do zero)
+                # Este bloco garante que não haja lacunas no início se a primeira camada deve ser 0.0
+                if todas_camadas and todas_camadas[0]['prof_inicial'] != 0.0:
+                    # If the first layer doesn't start at 0, and we want to ensure continuity from 0
+                    # this part needs to be very careful not to accidentally overwrite user's initial 0
+                    # For now, let's keep it simple: if the first layer's Prof_Inicial is > 0, we don't force it to 0.
+                    # The user can edit the Prof_Inicial of the first layer to 0 if needed.
+                    pass # Keep initial values as entered by user for now.
+
+                # Garante continuidade das camadas subsequentes (se não houver lacunas por remoção)
                 if todas_camadas:
-                    todas_camadas[0]['Prof_Inicial'] = 0.0
-                    for i in range(1, len(todas_camadas)):
-                        todas_camadas[i]['Prof_Inicial'] = todas_camadas[i-1]['Prof_Final']
+                    current_prof_end = 0.0
+                    for i, camada in enumerate(todas_camadas):
+                        if i == 0:
+                            # A primeira camada pode ter sua Prof_Inicial definida pelo usuário (ex: 0.0)
+                            # ou manter a Prof_Inicial original se for uma camada existente não alterada.
+                            pass 
+                        else:
+                            # Ajusta a Prof_Inicial da camada atual para ser igual à Prof_Final da camada anterior.
+                            todas_camadas[i]['prof_inicial'] = todas_camadas[i-1]['prof_final_camada']
                 
-                self.dados_sondagens[sondagem_name]['Camadas'] = [c for c in todas_camadas if c['Prof_Final'] > c['Prof_Inicial']]
+                # Filtra camadas inválidas e atualiza os dados da sondagem
+                self.dados_sondagens[sondagem_name]['camadas'] = [c for c in todas_camadas if c['prof_final_camada'] > c['prof_inicial']]
                 
                 self.refresh_sondagem_treeview(sondagem_name)
                 dialog.destroy()
@@ -361,44 +380,100 @@ class App(tk.Tk):
                 print(f"Aviso: Pulando pilar '{pilar.get('Nome', 'N/A')}' devido a dados inválidos. Erro: {e}")
 
     def update_sondagem_display(self):
-        """Recria as abas de sondagem e atualiza a exibição."""
-        # Limpa abas existentes
+        """Atualiza a Treeview de sondagens e o notebook de abas."""
+        # Limpa as abas existentes
         for tab in self.sondagem_notebook.tabs():
             self.sondagem_notebook.forget(tab)
-        
-        # Cria uma aba para cada sondagem
-        for nome in self.dados_sondagens:
-            frame = ttk.Frame(self.sondagem_notebook)
-            self.sondagem_notebook.add(frame, text=nome)
-            
-            cols = ("Cota", "Prof.", "Tipo de Solo", "N")
-            tree = ttk.Treeview(frame, columns=cols, show="headings")
-            for col in cols:
-                tree.heading(col, text=col)
-                tree.column(col, width=150, anchor="center")
-            tree.pack(expand=True, fill="both")
-            
-            ttk.Button(frame, text="Salvar Alterações na Sondagem", command=lambda n=nome, t=tree: self.save_sondagem_changes(n, t)).pack(pady=5)
-            self.make_treeview_editable(tree, nome)
-            self.refresh_sondagem_treeview(nome)
+        self.sondagem_treeviews.clear() # Limpa as referências dos Treeviews antigos
 
-    def save_sondagem_changes(self, sondagem_name, tree):
+        if not self.dados_sondagens:
+            empty_frame = ttk.Frame(self.sondagem_notebook)
+            self.sondagem_notebook.add(empty_frame, text="Nenhuma Sondagem")
+            ttk.Label(empty_frame, text="Nenhuma sondagem cadastrada.", wraplength=300).pack(pady=20)
+            self.current_sondagem_name = None
+            self.na_var_display.set("0.0")
+            self.cota_terreno_var_display.set("0.0")
+        else:
+            for nome_sondagem in sorted(self.dados_sondagens.keys()):
+                sondagem_detail_frame = ttk.Frame(self.sondagem_notebook)
+                self.sondagem_notebook.add(sondagem_detail_frame, text=nome_sondagem)
+
+                # Cria o Treeview para esta sondagem e o armazena
+                cols = ("Cota", "Prof.", "Tipo de Solo", "N")
+                tree = ttk.Treeview(sondagem_detail_frame, columns=cols, show="headings")
+                for col in cols:
+                    tree.heading(col, text=col)
+                    tree.column(col, width=150, anchor="center")
+                tree.pack(expand=True, fill="both")
+                self.sondagem_treeviews[nome_sondagem] = tree # Armazena a referência
+
+                # Adiciona o botão Salvar Alterações na Sondagem
+                ttk.Button(sondagem_detail_frame, text="Salvar Alterações na Sondagem", command=lambda n=nome_sondagem: self.save_sondagem_changes(n)).pack(pady=5)
+
+                self.make_treeview_editable(tree, nome_sondagem)
+                self.refresh_sondagem_treeview(nome_sondagem)
+
+            # Seleciona a primeira aba ou mantém a selecionada se existir
+            if self.dados_sondagens:
+                if self.current_sondagem_name and self.current_sondagem_name in self.dados_sondagens:
+                    # Tenta re-selecionar a aba que estava ativa
+                    for i, tab_id in enumerate(self.sondagem_notebook.tabs()):
+                        if self.sondagem_notebook.tab(tab_id, "text") == self.current_sondagem_name:
+                            self.sondagem_notebook.select(i)
+                            break
+                else:
+                    # Seleciona a primeira aba se a atual não existir mais ou for nula
+                    first_tab_id = self.sondagem_notebook.tabs()[0] if self.sondagem_notebook.tabs() else None
+                    if first_tab_id:
+                        self.sondagem_notebook.select(first_tab_id)
+                        self.current_sondagem_name = self.sondagem_notebook.tab(first_tab_id, "text")
+                    else:
+                        self.current_sondagem_name = None
+
+            # Garante que os campos de N.A. e Cota do Terreno reflitam a sondagem selecionada
+            if self.current_sondagem_name:
+                sondagem_data = self.dados_sondagens[self.current_sondagem_name]
+                self.na_var_display.set(str(sondagem_data.get('NA', 0.0)))
+                self.cota_terreno_var_display.set(str(sondagem_data.get('Cota_Terreno', 0.0)))
+            else:
+                self.na_var_display.set("0.0")
+                self.cota_terreno_var_display.set("0.0")
+        
+        # *** Chamar o método para popular as abas de dimensionamento geotécnico ***
+        if hasattr(self, 'geo_design_frame') and self.geo_design_frame:
+            self.geo_design_frame._populate_de_court_tabs()
+
+    def save_sondagem_changes(self, sondagem_name):
         """Salva as alterações feitas diretamente na tabela de uma sondagem."""
+        if sondagem_name not in self.sondagem_treeviews:
+            messagebox.showerror("Erro", "Treeview da sondagem não encontrada.")
+            return
+        
+        tree = self.sondagem_treeviews[sondagem_name]
         try:
             camadas_novas = []
             cota_terreno = self.dados_sondagens[sondagem_name]['Cota_Terreno']
             
             for child in tree.get_children():
                 valores = tree.item(child, 'values')
-                prof_final = float(valores[1])
-                prof_inicial = camadas_novas[-1]['Prof_Final'] if camadas_novas else 0.0
+                # Valores na Treeview: Cota, Prof., Tipo de Solo, N
+                # Precisamos de Prof_Inicial, Prof_Final_Camada, Tipo_Solo, N_SPT
+                prof_final_camada = float(valores[1]) # Profundidade final é o segundo valor
+                n_spt = int(valores[3]) # N é o quarto valor
+                tipo_solo = valores[2] # Tipo de Solo é o terceiro valor
 
+                # A profundidade inicial de uma camada é a profundidade final da camada anterior
+                # Ou 0.0 se for a primeira camada
+                prof_inicial = camadas_novas[-1]['prof_final_camada'] if camadas_novas else 0.0
+                
                 camadas_novas.append({
-                    'Prof_Inicial': prof_inicial, 'Prof_Final': prof_final,
-                    'Tipo_Solo': valores[2], 'NSPT': int(valores[3])
+                    'prof_inicial': prof_inicial, 
+                    'prof_final_camada': prof_final_camada,
+                    'tipo_solo': tipo_solo, 
+                    'n_spt': n_spt
                 })
             
-            self.dados_sondagens[sondagem_name]['Camadas'] = camadas_novas
+            self.dados_sondagens[sondagem_name]['camadas'] = camadas_novas # Ajusta para 'camadas' em minúsculas
             self.refresh_sondagem_treeview(sondagem_name) # Re-ordena e re-exibe
             messagebox.showinfo("Sucesso", f"Alterações em {sondagem_name} salvas.")
         except (ValueError, IndexError) as e:
@@ -406,26 +481,29 @@ class App(tk.Tk):
 
     def refresh_sondagem_treeview(self, sondagem_name):
         """Atualiza a tabela de uma sondagem específica."""
-        for tab_id in self.sondagem_notebook.tabs():
-            if self.sondagem_notebook.tab(tab_id, "text") == sondagem_name:
-                frame = self.sondagem_notebook.nametowidget(tab_id)
-                tree = next(w for w in frame.winfo_children() if isinstance(w, ttk.Treeview))
+        if sondagem_name not in self.sondagem_treeviews:
+            # Isso pode acontecer se a aba foi limpa mas o refresh foi chamado antes da recriação
+            return
+        
+        tree = self.sondagem_treeviews[sondagem_name]
                 
-                tree.delete(*tree.get_children())
-                sondagem_data = self.dados_sondagens[sondagem_name]
-                cota_terreno = sondagem_data.get('Cota_Terreno', 0.0)
-                
-                # Ordena camadas pela profundidade final
-                camadas_sorted = sorted(sondagem_data.get('Camadas', []), key=lambda x: x['Prof_Final'])
-                
-                for camada in camadas_sorted:
-                    prof_final = float(camada['Prof_Final'])
-                    cota_camada = cota_terreno - prof_final
-                    tree.insert("", "end", values=[
-                        f"{cota_camada:.2f}", f"{prof_final:.2f}",
-                        camada["Tipo_Solo"], camada["NSPT"]
-                    ])
-                break
+        tree.delete(*tree.get_children())
+        sondagem_data = self.dados_sondagens[sondagem_name]
+        cota_terreno = sondagem_data.get('Cota_Terreno', 0.0)
+        
+        # Ordena camadas pela profundidade inicial (agora é 'prof_inicial')
+        camadas_sorted = sorted(sondagem_data.get('camadas', []), key=lambda x: x['prof_inicial'])
+        
+        for camada in camadas_sorted:
+            prof_inicial = float(camada['prof_inicial'])
+            prof_final_camada = float(camada['prof_final_camada'])
+            cota_inicial = cota_terreno - prof_inicial
+            cota_final_camada = cota_terreno - prof_final_camada
+
+            tree.insert("", "end", values=[
+                f"{cota_inicial:.2f}", f"{prof_final_camada:.2f}",
+                camada["tipo_solo"], camada["n_spt"]
+            ])
 
     def make_treeview_editable(self, tree, sondagem_name):
         """Permite a edição das células da tabela de sondagem."""
@@ -472,9 +550,19 @@ class App(tk.Tk):
                 # Recalcula cota se a profundidade mudar
                 if col_name == "Prof.":
                     cota_terreno = self.dados_sondagens[sondagem_name]['Cota_Terreno']
-                    new_cota = cota_terreno - float(new_value.replace(',', '.'))
-                    current_values[0] = f"{new_cota:.2f}"
-                
+                    # A coluna "Prof." agora é a profundidade final da camada
+                    new_prof_final = float(new_value.replace(',', '.'))
+                    current_values[1] = f"{new_prof_final:.2f}" # Atualiza a profundidade final
+                    new_cota_final = cota_terreno - new_prof_final
+                    current_values[0] = f"{new_cota_final:.2f}" # Atualiza a cota da profundidade final
+
+                    # Também preciso atualizar a profundidade inicial da PRÓXIMA camada, se houver
+                    next_item = tree.next(item_id)
+                    if next_item:
+                        next_values = list(tree.item(next_item, 'values'))
+                        next_values[1] = f"{new_prof_final:.2f}" # Atualiza a profundidade inicial da próxima camada
+                        tree.item(next_item, values=next_values)
+
                 tree.item(item_id, values=current_values)
 
                 # Navegação com Enter na coluna 'N'
@@ -498,6 +586,33 @@ class App(tk.Tk):
             editor.bind("<FocusOut>", on_editor_finish)
 
         tree.bind("<Double-1>", on_double_click)
+
+    def load_sondagem_data(self):
+        """Carrega os dados de sondagem de um arquivo JSON."""
+        try:
+            with open("sondagens.json", "r", encoding="utf-8") as f:
+                self.dados_sondagens = json.load(f)
+            self.update_sondagem_display() # Atualiza a UI com os dados carregados
+            messagebox.showinfo("Dados Carregados", "Dados de sondagem carregados com sucesso!")
+        except FileNotFoundError:
+            messagebox.showinfo("Início", "Nenhum arquivo de sondagem existente. Iniciando com dados vazios.")
+        except Exception as e:
+            messagebox.showerror("Erro de Carregamento", f"Erro ao carregar dados de sondagem: {e}")
+
+    def save_sondagem_data(self):
+        """Salva os dados de sondagem em um arquivo JSON."""
+        try:
+            with open("sondagens.json", "w", encoding="utf-8") as f:
+                json.dump(self.dados_sondagens, f, indent=4)
+            # messagebox.showinfo("Dados Salvos", "Dados de sondagem salvos com sucesso!") # Pode ser muito intrusivo
+        except Exception as e:
+            messagebox.showerror("Erro ao Salvar", f"Erro ao salvar dados de sondagem: {e}")
+
+    def on_closing(self):
+        """Chamado quando a janela é fechada. Salva os dados e fecha o app."""
+        if messagebox.askyesno("Sair", "Deseja salvar os dados de sondagem antes de sair?"):
+            self.save_sondagem_data()
+        self.destroy()
 
 if __name__ == "__main__":
     app = App()
