@@ -18,3 +18,15 @@ python gerenciador.py
 ```
 
 A aplicação abrirá uma janela permitindo importar arquivos Excel com dados de pilares e gerenciar sondagens.
+
+## Cálculo de Capacidade de Estacas
+
+O módulo `calculo_estacas.py` fornece funções genéricas para estimar a capacidade de carga de estacas pelos métodos semiempíricos de Aoki & Velloso e Décourt & Quaresma. Veja o bloco `__main__` no próprio arquivo para um exemplo de uso com dados fictícios.
+
+Execute o módulo diretamente para visualizar o exemplo:
+
+```bash
+python calculo_estacas.py
+```
+
+Adapte os coeficientes utilizados conforme o tipo de solo e de estaca do seu projeto.
